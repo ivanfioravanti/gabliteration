@@ -5,7 +5,7 @@ import sys
 
 if __name__ == "__main__":
     subcommands = {
-        "automated",
+        "automate",
     }
     if len(sys.argv) < 2:
         raise ValueError(f"CLI requires a subcommand in {subcommands}")
