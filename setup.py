@@ -12,7 +12,7 @@ setup(
     description="Automated Gabliteration",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
-    url="https://arxiv.org/abs/2512.18901",
+    url="https://github.com/Goekdeniz-Guelmez/gabliteration",
     packages=["gabliterate"],
     license="MIT",
     python_requires=">=3.8",

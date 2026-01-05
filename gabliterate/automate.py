@@ -554,6 +554,12 @@ Examples:
         default=10,
         help="Number of samples for KL divergence computation (default: 10)"
     )
+    parser.add_argument(
+        "--save-folder", "-s",
+        type=str,
+        default=None,
+        help="Output folder to save the gabliterated model (default: auto-generated based on model name)"
+    )
     
     args = parser.parse_args()
     
@@ -687,7 +693,10 @@ Examples:
     
     # Prepare output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = f"{HF_MODEL_NAME.replace('/', '_')}-gabliterated-v{version_id}-{timestamp}"
+    if args.save_folder:
+        output_dir = args.save_folder
+    else:
+        output_dir = f"{HF_MODEL_NAME.replace('/', '_')}-gabliterated-v{selected_result.version_id}-{timestamp}"
     
     print(f"\nSaving model to: {output_dir}")
     final_model.save_pretrained(output_dir)

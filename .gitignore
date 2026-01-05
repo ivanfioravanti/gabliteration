@@ -1,9 +1,9 @@
 *.egg-info
 .*.egg-info
-
 .vscode/
 __pycache__/
 *.pyc
 .DS_Store
 env/
 venv/
+test*
