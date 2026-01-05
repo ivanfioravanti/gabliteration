@@ -31,7 +31,7 @@ This script automates the process of finding optimal Gabliteration parameters by
 pip install gabliteration
 ```
 
-This will install all dependencies and make the `gabliterate` command available system-wide.
+This will install all dependencies and make the `gabliterate.automate` command available system-wide.
 
 The tool automatically downloads these datasets from HuggingFace:
 - `mlabonne/harmful_behaviors` - Harmful prompts for training
@@ -45,13 +45,13 @@ Test your favorite model with:
 
 ```bash
 # Basic usage
-gabliterate --model "Nanbeige/Nanbeige4-3B-Thinking-2511"
+gabliterate.automate --model "Nanbeige/Nanbeige4-3B-Thinking-2511"
 
 # With custom parameters
-gabliterate --model "meta-llama/Llama-3.2-1B-Instruct" --num-versions 50 --batch-size 4
+gabliterate.automate --model "meta-llama/Llama-3.2-1B-Instruct" --num-versions 50 --batch-size 4
 
 # Full options
-gabliterate --model "Qwen/Qwen3-4B-Instruct-2507" \
+gabliterate.automate --model "Qwen/Qwen3-4B-Instruct-2507" \
   --num-versions 100 \
   --test-samples 200 \
   --max-tokens 150 \
@@ -67,7 +67,7 @@ gabliterate --model "Qwen/Qwen3-4B-Instruct-2507" \
 - `--batch-size, -b`: Batch size for evaluation (default: 2)
 - `--kl-samples`: KL divergence samples (default: 10)
 
-Run `gabliterate --help` to see all options.
+Run `gabliterate.automate --help` to see all options.
 
 ### 3. Review and Select
 
@@ -181,7 +181,7 @@ The script randomly samples from these ranges:
 Increase the number of versions tested:
 
 ```bash
-gabliterate --model "Qwen/Qwen3-4B-Instruct-2507" --num-versions 200
+gabliterate.automate --model "Qwen/Qwen3-4B-Instruct-2507" --num-versions 200
 ```
 
 ### Custom Evaluation Parameters
@@ -189,7 +189,7 @@ gabliterate --model "Qwen/Qwen3-4B-Instruct-2507" --num-versions 200
 Fine-tune evaluation settings:
 
 ```bash
-gabliterate --model "meta-llama/Llama-3.2-1B-Instruct" \
+gabliterate.automate --model "meta-llama/Llama-3.2-1B-Instruct" \
   --test-samples 300 \
   --kl-samples 25 \
   --max-tokens 200
@@ -200,7 +200,7 @@ gabliterate --model "meta-llama/Llama-3.2-1B-Instruct" \
 Adjust batch size for faster evaluation:
 
 ```bash
-gabliterate --model "Nanbeige/Nanbeige4-3B-Thinking-2511" \
+gabliterate.automate --model "Nanbeige/Nanbeige4-3B-Thinking-2511" \
   --batch-size 8 \
   --num-versions 100
 ```
@@ -227,24 +227,24 @@ Clone the repository and edit `GabliterationConfig.random()` method in the sourc
 
 1. **Quick Test** (5 minutes):
    ```bash
-   gabliterate --model "your-model" --num-versions 5 --test-samples 50
+   gabliterate.automate --model "your-model" --num-versions 5 --test-samples 50
    ```
 
 2. **Standard Search** (30 minutes):
    ```bash
-   gabliterate --model "your-model" --num-versions 20 --test-samples 100
+   gabliterate.automate --model "your-model" --num-versions 20 --test-samples 100
    ```
 
 3. **Thorough Search** (2+ hours):
    ```bash
-   gabliterate --model "your-model" --num-versions 50 --test-samples 200
+   gabliterate.automate --model "your-model" --num-versions 50 --test-samples 200
    ```
 
 ## Troubleshooting
 
 ### Out of Memory
 ```bash
-gabliterate --model "your-model" --num-versions 10 --batch-size 1 --test-samples 50
+gabliterate.automate --model "your-model" --num-versions 10 --batch-size 1 --test-samples 50
 ```
 - Reduce `--num-versions`
 - Use smaller model
