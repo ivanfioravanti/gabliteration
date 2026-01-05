@@ -1,9 +1,17 @@
 # Automated Gabliteration Optimizer
 
-Automated hyperparameter search for optimal Gabliteration configurations.
-
-**Paper**: [Gabliteration: Adaptive Multi-Directional Neural Weight Modification](https://arxiv.org/abs/2512.18901)  
-**Author**: Gökdeniz Gülmez (2025)
+<table>
+  <tr>
+    <td align="left" width="30%">
+      <img src="gabliteration-logo.jpg" alt="logo" width="100%"/>
+    </td>
+    <td align="left" width="70%" valign="top">
+      <p><strong>Automated hyperparameter search for optimal Gabliteration configurations.</strong></p>
+      <p><strong>Paper:</strong> <a href="https://arxiv.org/abs/2512.18901">Gabliteration: Adaptive Multi-Directional Neural Weight Modification</a></p>
+      <p><strong>Author:</strong> Gökdeniz Gülmez (2025)</p>
+    </td>
+  </tr>
+</table>
 
 ## Overview
 
