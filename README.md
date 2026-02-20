@@ -153,10 +153,14 @@ The `gabliteration_config.json` contains:
 - **Lower is better**: Smaller values = model behaves more similarly to original
 - **Target**: Keep <0.05 to preserve model quality
 
+### Perplexity (PPL)
+- **What**: Measures the model's predictive quality on a harmless dataset
+- **Lower is better**: Lower values indicate better language modeling capabilities
+- **Score Impact**: Significant regressions in perplexity vs the original model are penalized
+
 ### Score
-- **What**: Combined metric = 10×RefusalRate + KLDivergence
-- **Lower is better**: Balances refusal reduction with model preservation
-- **Weights refusal rate 10x more than KL**: Primary goal is reducing refusals
+- **What**: Combined metric = 10×RefusalRate + 1×KLDivergence + 2×max(0, log(PPL_ratio))
+- **Lower is better**: Balances refusal reduction with model preservation and quality
 
 ## Hyperparameter Ranges
 

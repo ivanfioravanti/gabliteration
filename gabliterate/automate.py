@@ -20,7 +20,9 @@ from tqdm import tqdm
 import warnings
 import numpy as np
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence, Union
+import torch.nn.functional as F
+import math
 
 warnings.filterwarnings('ignore')
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -101,11 +103,15 @@ class GabliterationResult:
                  version_id: int,
                  config: GabliterationConfig,
                  kl_divergence: float,
-                 refusal_rate: float):
+                 refusal_rate: float,
+                 perplexity: Optional[float] = None,
+                 perplexity_ratio: Optional[float] = None):
         self.version_id = version_id
         self.config = config
         self.kl_divergence = kl_divergence
         self.refusal_rate = refusal_rate
+        self.perplexity = perplexity
+        self.perplexity_ratio = perplexity_ratio
         self.score = self._compute_score()
     
     def _compute_score(self) -> float:
@@ -116,12 +122,23 @@ class GabliterationResult:
         """
         # Primary goal: minimize refusal rate (weight 10x)
         # Secondary goal: minimize KL divergence (keep model similar)
-        return 10.0 * self.refusal_rate + 1.0 * self.kl_divergence
+        # Tertiary goal: minimize perplexity regression (if available)
+        
+        score = 10.0 * self.refusal_rate + 1.0 * self.kl_divergence
+        
+        if self.perplexity_ratio is not None:
+            # Penalize if perplexity increases (ratio > 1)
+            # Use log for stability: log(ppl_mod) - log(ppl_orig)
+            delta_log_ppl = max(0.0, math.log(self.perplexity_ratio))
+            score += 2.0 * delta_log_ppl
+            
+        return score
     
     def __str__(self) -> str:
+        ppl_str = f", PPL={self.perplexity:.2f}" if self.perplexity is not None else ""
         return (f"Version {self.version_id}: "
                 f"Refusal={self.refusal_rate:.1%}, "
-                f"KL={self.kl_divergence:.4f}, "
+                f"KL={self.kl_divergence:.4f}{ppl_str}, "
                 f"Score={self.score:.4f}")
 
 def setup_model(model_id: str):
@@ -129,16 +146,22 @@ def setup_model(model_id: str):
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
-    torch.set_default_device(device)
     torch.set_grad_enabled(False)
+    
+    # Use device_map only if we have a GPU/MPS and accelerate is installed
+    device_map = device if device != "cpu" else None
     
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         trust_remote_code=True,
         dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
-        device_map=device
+        device_map=device_map
     )
+    
+    if device_map is None:
+        model = model.to(device)
+        
     model.requires_grad_(False)
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     
@@ -254,6 +277,75 @@ def compute_kl_divergence(original_model, modified_model, tokenizer, prompts, de
         kl_divs.append(kl.item())
     
     return np.mean(kl_divs)
+
+
+class PerplexityResult:
+    def __init__(self, ppl: float, mean_nll: float, num_tokens: int):
+        self.ppl = ppl
+        self.mean_nll = mean_nll
+        self.num_tokens = num_tokens
+
+def compute_perplexity(
+    model,
+    tokenizer,
+    texts: Sequence[str],
+    device: str,
+    sequence_length: int = 512,
+    max_samples: int = 128,
+    batch_size: int = 4
+) -> PerplexityResult:
+    """
+    Compute perplexity of the model on a given set of texts.
+    Based on the implementation in mlx-lm.
+    """
+    all_token_ids = []
+    for text in texts:
+        ids = tokenizer.encode(text, add_special_tokens=True)
+        all_token_ids.extend(ids)
+    
+    # Chunk into fixed-length sequences
+    num_tokens = len(all_token_ids)
+    num_sequences = num_tokens // sequence_length
+    
+    if num_sequences == 0:
+        # If texts are too short, just use what we have
+        input_ids = torch.tensor([all_token_ids], device=device)
+    else:
+        # Truncate to match max_samples if needed
+        num_sequences = min(num_sequences, max_samples)
+        input_ids = torch.tensor(
+            all_token_ids[:num_sequences * sequence_length], 
+            device=device
+        ).reshape(num_sequences, sequence_length)
+
+    total_nll = 0.0
+    total_tokens = 0
+    
+    # Process in batches
+    for i in range(0, input_ids.size(0), batch_size):
+        batch = input_ids[i : i + batch_size]
+        
+        with torch.no_grad():
+            # Forward pass: get logits for all tokens
+            outputs = model(batch)
+            logits = outputs.logits[:, :-1, :] # [batch, seq_len-1, vocab]
+            labels = batch[:, 1:]              # [batch, seq_len-1]
+            
+            # Compute cross entropy loss
+            # Shifted so that we predict the next token
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)).float(),
+                labels.reshape(-1),
+                reduction="sum"
+            )
+            
+            total_nll += loss.item()
+            total_tokens += labels.numel()
+            
+    mean_nll = total_nll / total_tokens if total_tokens > 0 else 0.0
+    ppl = math.exp(mean_nll)
+    
+    return PerplexityResult(ppl, mean_nll, total_tokens)
 
 
 def compute_pareto_front(results: List[GabliterationResult]) -> List[GabliterationResult]:
@@ -412,6 +504,8 @@ def test_configuration(
     harmless_prompts: List[str],
     test_prompts: List[str],
     kl_prompts: List[str],
+    ppl_eval_texts: List[str],
+    baseline_ppl: Optional[float],
     device: str
 ) -> GabliterationResult:
     """Test a single gabliteration configuration"""
@@ -458,13 +552,16 @@ def test_configuration(
     
     # Create modified model (deep copy)
     print("Creating modified model...")
+    device_map = device if device != "cpu" else None
     modified_model = AutoModelForCausalLM.from_pretrained(
         HF_MODEL_NAME,
         trust_remote_code=True,
         dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
-        device_map=device
+        device_map=device_map
     )
+    if device_map is None:
+        modified_model = modified_model.to(device)
     modified_model.requires_grad_(False)
     
     # Apply gabliteration
@@ -490,6 +587,19 @@ def test_configuration(
     )
     print(f"Refusal Rate: {refusal_rate:.1%} ({int(refusal_rate * len(test_prompts))}/{len(test_prompts)})")
     
+    # Evaluate perplexity
+    perplexity = None
+    perplexity_ratio = None
+    if baseline_ppl is not None and ppl_eval_texts:
+        print("Evaluating perplexity...")
+        ppl_res = compute_perplexity(
+            modified_model, tokenizer, ppl_eval_texts, device,
+            batch_size=BATCH_SIZE
+        )
+        perplexity = ppl_res.ppl
+        perplexity_ratio = perplexity / baseline_ppl
+        print(f"Perplexity: {perplexity:.4f} (Ratio: {perplexity_ratio:.4f})")
+    
     # Clean up
     del modified_model
     gc.collect()
@@ -498,7 +608,7 @@ def test_configuration(
     elif torch.backends.mps.is_available():
         torch.mps.empty_cache()
     
-    result = GabliterationResult(version_id, config, kl_div, refusal_rate)
+    result = GabliterationResult(version_id, config, kl_div, refusal_rate, perplexity, perplexity_ratio)
     print(f"Score: {result.score:.4f}")
     
     return result
@@ -560,6 +670,17 @@ Examples:
         default=None,
         help="Output folder to save the gabliterated model (default: auto-generated based on model name)"
     )
+    parser.add_argument(
+        "--disable-ppl",
+        action="store_true",
+        help="Disable perplexity evaluation"
+    )
+    parser.add_argument(
+        "--ppl-samples",
+        type=int,
+        default=50,
+        help="Number of samples for perplexity computation (default: 50)"
+    )
     
     args = parser.parse_args()
     
@@ -607,6 +728,19 @@ Examples:
         min(KL_DIVERGENCE_SAMPLES, len(harmless_prompts))
     )
     
+    # Prepare perplexity evaluation texts
+    ppl_eval_texts = []
+    baseline_ppl = None
+    if not args.disable_ppl:
+        ppl_eval_texts = random.sample(harmless_prompts, min(args.ppl_samples, len(harmless_prompts)))
+        print("\nComputing baseline perplexity for the original model...")
+        baseline_res = compute_perplexity(
+            original_model, tokenizer, ppl_eval_texts, device,
+            batch_size=BATCH_SIZE
+        )
+        baseline_ppl = baseline_res.ppl
+        print(f"Original Model Perplexity: {baseline_ppl:.4f}")
+    
     # Test all configurations
     results = []
     for version_id in range(1, NUM_VERSIONS + 1):
@@ -622,6 +756,8 @@ Examples:
                 harmless_prompts,
                 test_prompts,
                 kl_prompts,
+                ppl_eval_texts,
+                baseline_ppl,
                 device
             )
             results.append(result)
@@ -638,11 +774,18 @@ Examples:
     print("\n" + "="*80)
     print("TOP 10 BEST CONFIGURATIONS")
     print("="*80)
-    print(f"{'Rank':<6} {'Refusal':<10} {'KL Div':<10} {'Score':<10} {'Config'}")
-    print("-"*80)
     
-    for rank, result in enumerate(results[:10], 1):
-        print(f"{rank:<6} {result.refusal_rate:>8.1%} {result.kl_divergence:>9.4f} {result.score:>9.4f}  {result.config}")
+    if baseline_ppl is not None:
+        print(f"{'Rank':<6} {'Refusal':<10} {'KL Div':<10} {'PPL':<10} {'Score':<10} {'Config'}")
+        print("-"*80)
+        for rank, result in enumerate(results[:10], 1):
+            ppl_val = f"{result.perplexity:9.2f}" if result.perplexity is not None else "N/A"
+            print(f"{rank:<6} {result.refusal_rate:>8.1%} {result.kl_divergence:>9.4f} {ppl_val} {result.score:>9.4f}  {result.config}")
+    else:
+        print(f"{'Rank':<6} {'Refusal':<10} {'KL Div':<10} {'Score':<10} {'Config'}")
+        print("-"*80)
+        for rank, result in enumerate(results[:10], 1):
+            print(f"{rank:<6} {result.refusal_rate:>8.1%} {result.kl_divergence:>9.4f} {result.score:>9.4f}  {result.config}")
     
     # Automatically select the best configuration
     selected_result = results[0]
@@ -674,13 +817,17 @@ Examples:
     refusal_dirs = refusal_dirs.to(device)
     
     # Create final model
+    print("Creating final model...")
+    device_map = device if device != "cpu" else None
     final_model = AutoModelForCausalLM.from_pretrained(
         HF_MODEL_NAME,
         trust_remote_code=True,
         dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
-        device_map=device
+        device_map=device_map
     )
+    if device_map is None:
+        final_model = final_model.to(device)
     final_model.requires_grad_(False)
     
     # Apply gabliteration
@@ -711,6 +858,8 @@ Examples:
         'results': {
             'kl_divergence': selected_result.kl_divergence,
             'refusal_rate': selected_result.refusal_rate,
+            'perplexity': selected_result.perplexity,
+            'perplexity_ratio': selected_result.perplexity_ratio,
             'score': selected_result.score
         }
     }
@@ -761,6 +910,16 @@ model-index: f"{HF_MODEL_NAME.replace('/', '_')}-gabliterated"
           - name: Refusal Rate
             type: pass@1
             value: {selected_result.refusal_rate}
+      
+      - task:
+          type: text-generation
+        dataset:
+          type: harmless_alpaca
+          name: Harmless Alpaca
+        metrics:
+          - name: Perplexity
+            type: perplexity
+            value: {selected_result.perplexity if selected_result.perplexity is not None else "N/A"}
 ---
 
 # Gabliterated Model Series
@@ -775,6 +934,7 @@ My new Gabliteration technique addresses the fundamental limitation of existing 
 ```text
 Refusal: {int(selected_result.refusal_rate * NUM_TEST_SAMPLES)}/{NUM_TEST_SAMPLES}
 KL Div: {selected_result.kl_divergence:.4f}
+Perplexity: {f"{selected_result.perplexity:.2f}" if selected_result.perplexity is not None else "N/A"}
 Config:
     Samples: {config.num_prompt_samples}
     Skip: [{config.skip_begin_layers}, {config.skip_end_layers}]
@@ -823,6 +983,8 @@ This work builds upon the foundational research by Arditi et al. (2024) on refus
     print(f"\nFinal Statistics:")
     print(f"  - Refusal Rate: {selected_result.refusal_rate:.1%}")
     print(f"  - KL Divergence: {selected_result.kl_divergence:.4f}")
+    if selected_result.perplexity is not None:
+        print(f"  - Perplexity: {selected_result.perplexity:.4f} (Ratio: {selected_result.perplexity_ratio:.4f})")
     print(f"  - Score: {selected_result.score:.4f}")
     print(f"\nConfiguration saved to: {os.path.join(output_dir, 'gabliteration_config.json')}")
     
