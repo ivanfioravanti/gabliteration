@@ -56,7 +56,10 @@ gabliterate --model "Qwen/Qwen3-4B-Instruct-2507" \
   --test-samples 200 \
   --max-tokens 150 \
   --batch-size 4 \
-  --kl-samples 15
+  --kl-samples 15 \
+  --ppl-num-samples 256 \
+  --ppl-seq-len 512 \
+  --seed 123
 ```
 
 **CLI Options:**
@@ -66,6 +69,11 @@ gabliterate --model "Qwen/Qwen3-4B-Instruct-2507" \
 - `--max-tokens`: Max tokens to generate during evaluation (default: 100)
 - `--batch-size, -b`: Batch size for evaluation (default: 2)
 - `--kl-samples`: KL divergence samples (default: 10)
+- `--disable-ppl`: Disable perplexity evaluation
+- `--ppl-dataset`: Dataset for perplexity evaluation (default: `allenai/tulu-3-sft-mixture`)
+- `--ppl-num-samples`: Number of samples for perplexity computation (default: 256)
+- `--ppl-seq-len`: Sequence length for perplexity computation (default: 512)
+- `--seed`: Random seed for reproducibility (default: 123)
 
 Run `gabliterate --help` to see all options.
 
@@ -86,10 +94,10 @@ After all tests, you'll see:
 
 ```
 TOP 10 BEST CONFIGURATIONS
-Rank   Refusal    KL Div     Score      Config
+Rank   Refusal    KL Div     PPL        Score      Config
 ----------------------------------------------------------------------
-1      8.0%       0.0189     0.8189     Samples: 150, Skip: [2, 1], ...
-2      12.0%      0.0234     1.2234     Samples: 100, Skip: [1, 2], ...
+1      8.0%       0.0189     7.32       0.8189     Samples: 150, Skip: [2, 1], ...
+2      12.0%      0.0234     7.88       1.2234     Samples: 100, Skip: [1, 2], ...
 ...
 ```
 
@@ -135,9 +143,10 @@ The `gabliteration_config.json` contains:
   "results": {
     "kl_divergence": 0.0189,
     "refusal_rate": 0.08,
+    "perplexity": 7.32,
+    "perplexity_ratio": 1.04,
     "score": 0.8189
-  },
-  "all_results": [...]  // Full results from all tested versions
+  }
 }
 ```
 

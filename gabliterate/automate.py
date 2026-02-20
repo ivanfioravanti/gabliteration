@@ -20,7 +20,7 @@ from tqdm import tqdm
 import warnings
 import numpy as np
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional
 import torch.nn.functional as F
 import math
 
@@ -287,7 +287,6 @@ class PerplexityResult:
 
 def compute_perplexity(
     model,
-    tokenizer,
     token_ids_list: List[List[int]],
     device: str,
     sequence_length: int = 512,
@@ -369,7 +368,7 @@ def coerce_token_ids(
     # 1. Extract raw IDs from various container types
     if isinstance(ids, dict) or (hasattr(ids, "data") and isinstance(ids.data, dict)):
         # Handle BatchEncoding or similar
-        ids = ids.get("input_ids", ids.get("input_ids", []))
+        ids = ids.get("input_ids", [])
         
     if hasattr(ids, "tolist"):
         # Handle torch.Tensor or numpy.ndarray
@@ -704,7 +703,7 @@ def test_configuration(
     if baseline_ppl is not None and ppl_eval_token_ids:
         print("Evaluating perplexity...")
         ppl_res = compute_perplexity(
-            modified_model, tokenizer, ppl_eval_token_ids, device,
+            modified_model, ppl_eval_token_ids, device,
             sequence_length=ppl_seq_len,
             max_samples=ppl_num_samples,
             batch_size=BATCH_SIZE
@@ -877,7 +876,7 @@ Examples:
         )
         print("\nComputing baseline perplexity for the original model...")
         baseline_res = compute_perplexity(
-            original_model, tokenizer, ppl_eval_token_ids, device,
+            original_model, ppl_eval_token_ids, device,
             sequence_length=args.ppl_seq_len,
             max_samples=args.ppl_num_samples,
             batch_size=BATCH_SIZE
