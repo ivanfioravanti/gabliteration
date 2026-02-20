@@ -20,7 +20,7 @@ from tqdm import tqdm
 import warnings
 import numpy as np
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 import torch.nn.functional as F
 import math
 
@@ -299,7 +299,15 @@ def compute_perplexity(
     Based on the implementation in mlx-lm.
     """
     all_token_ids = []
-    for ids in token_ids_list:
+    for j, ids in enumerate(token_ids_list):
+        if not isinstance(ids, list) or any(not isinstance(t, int) for t in ids):
+            # This should have been caught by coerce_token_ids, but we guard here too
+            # specifically to prevent the "too many dimensions 'str'" tensor error.
+            raise TypeError(
+                f"compute_perplexity expects List[List[int]]. "
+                f"Found bad sample at index {j}: type(ids)={type(ids).__name__}; "
+                f"example={ids[:10]!r}"
+            )
         all_token_ids.extend(ids)
     
     # Chunk into fixed-length sequences
@@ -347,6 +355,51 @@ def compute_perplexity(
     return PerplexityResult(ppl, mean_nll, total_tokens)
 
 
+def coerce_token_ids(
+    tokenizer,
+    ids: Any,
+    *,
+    add_eos: bool = True,
+    context: str = "",
+) -> List[int]:
+    """
+    Ensure we have a List[int] of token IDs.
+    Handles strings, tensors, and dicts that AutoTokenizer might return.
+    """
+    # 1. Extract raw IDs from various container types
+    if isinstance(ids, dict) or (hasattr(ids, "data") and isinstance(ids.data, dict)):
+        # Handle BatchEncoding or similar
+        ids = ids.get("input_ids", ids.get("input_ids", []))
+        
+    if hasattr(ids, "tolist"):
+        # Handle torch.Tensor or numpy.ndarray
+        ids = ids.flatten().tolist()
+        
+    if isinstance(ids, str):
+        # If it's a string (rendered template), encode it.
+        # add_special_tokens=False because template already includes them.
+        ids = tokenizer.encode(ids, add_special_tokens=False)
+        
+    if not isinstance(ids, list):
+        raise TypeError(f"[{context}] Expected list of IDs, got {type(ids).__name__}: {ids!r}")
+        
+    # 2. Ensure all elements are integers
+    # Sometimes extend() on a string creates a list of chars
+    if any(not isinstance(t, int) for t in ids):
+        # Try to convert to int if possible, otherwise fail
+        try:
+            ids = [int(t) for t in ids]
+        except (ValueError, TypeError):
+            raise TypeError(f"[{context}] List contains non-integer tokens: {ids!r}")
+            
+    # 3. Handle EOS (matches mlx-lm behavior)
+    eos_id = tokenizer.eos_token_id
+    if add_eos and eos_id is not None:
+        if not ids or ids[-1] != eos_id:
+            ids.append(eos_id)
+            
+    return ids
+
 def load_ppl_dataset(tokenizer, dataset_path="allenai/tulu-3-sft-mixture", num_samples=256, sequence_length=512, seed=123):
     """
     Load and process dataset for perplexity evaluation.
@@ -362,22 +415,37 @@ def load_ppl_dataset(tokenizer, dataset_path="allenai/tulu-3-sft-mixture", num_s
     target_tokens = num_samples * sequence_length
     
     for item in ds:
-        if "messages" in item:
-            # Handle chat format
-            ids = tokenizer.apply_chat_template(item["messages"], add_generation_prompt=False, return_tensors=None)
-        elif "prompt" in item and "completion" in item:
-            # Handle prompt-completion format
-            messages = [
-                {"role": "user", "content": item["prompt"]},
-                {"role": "assistant", "content": item["completion"]}
-            ]
-            ids = tokenizer.apply_chat_template(messages, add_generation_prompt=False, return_tensors=None)
-        elif "text" in item:
-            # Handle raw text format
-            ids = tokenizer.encode(item["text"], add_special_tokens=True)
-            if not ids or ids[-1] != tokenizer.eos_token_id:
-                ids.append(tokenizer.eos_token_id)
-        else:
+        try:
+            if "messages" in item:
+                # Handle chat format
+                ids = tokenizer.apply_chat_template(
+                    item["messages"],
+                    tools=item.get("tools"),
+                    add_generation_prompt=False,
+                    tokenize=True,
+                )
+                ids = coerce_token_ids(tokenizer, ids, context="ppl_dataset/messages")
+            elif "prompt" in item and "completion" in item:
+                # Handle prompt-completion format
+                messages = [
+                    {"role": "user", "content": item["prompt"]},
+                    {"role": "assistant", "content": item["completion"]}
+                ]
+                ids = tokenizer.apply_chat_template(
+                    messages,
+                    tools=item.get("tools"),
+                    add_generation_prompt=False,
+                    tokenize=True,
+                )
+                ids = coerce_token_ids(tokenizer, ids, context="ppl_dataset/prompt_completion")
+            elif "text" in item:
+                # Handle raw text format
+                ids = tokenizer.encode(item["text"], add_special_tokens=True)
+                ids = coerce_token_ids(tokenizer, ids, context="ppl_dataset/text")
+            else:
+                continue
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to process PPL dataset item: {e}")
             continue
             
         token_ids_list.append(ids)
