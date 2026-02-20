@@ -288,19 +288,18 @@ class PerplexityResult:
 def compute_perplexity(
     model,
     tokenizer,
-    texts: Sequence[str],
+    token_ids_list: List[List[int]],
     device: str,
     sequence_length: int = 512,
-    max_samples: int = 128,
+    max_samples: int = 256,
     batch_size: int = 4
 ) -> PerplexityResult:
     """
-    Compute perplexity of the model on a given set of texts.
+    Compute perplexity of the model on a given list of token IDs.
     Based on the implementation in mlx-lm.
     """
     all_token_ids = []
-    for text in texts:
-        ids = tokenizer.encode(text, add_special_tokens=True)
+    for ids in token_ids_list:
         all_token_ids.extend(ids)
     
     # Chunk into fixed-length sequences
@@ -308,10 +307,10 @@ def compute_perplexity(
     num_sequences = num_tokens // sequence_length
     
     if num_sequences == 0:
-        # If texts are too short, just use what we have
+        # If too short, just use what we have
         input_ids = torch.tensor([all_token_ids], device=device)
     else:
-        # Truncate to match max_samples if needed
+        # Truncate to match max_samples if needed (like mlx-lm)
         num_sequences = min(num_sequences, max_samples)
         input_ids = torch.tensor(
             all_token_ids[:num_sequences * sequence_length], 
@@ -346,6 +345,48 @@ def compute_perplexity(
     ppl = math.exp(mean_nll)
     
     return PerplexityResult(ppl, mean_nll, total_tokens)
+
+
+def load_ppl_dataset(tokenizer, dataset_path="allenai/tulu-3-sft-mixture", num_samples=256, sequence_length=512, seed=123):
+    """
+    Load and process dataset for perplexity evaluation.
+    Matches mlx-lm logic for allenai/tulu-3-sft-mixture.
+    """
+    print(f"Loading {dataset_path} for perplexity evaluation...")
+    # Using the same split as mlx-lm (train)
+    ds = load_dataset(dataset_path, split="train", streaming=True)
+    ds = ds.shuffle(seed=seed, buffer_size=1000)
+    
+    token_ids_list = []
+    total_tokens_collected = 0
+    target_tokens = num_samples * sequence_length
+    
+    for item in ds:
+        if "messages" in item:
+            # Handle chat format
+            ids = tokenizer.apply_chat_template(item["messages"], add_generation_prompt=False, return_tensors=None)
+        elif "prompt" in item and "completion" in item:
+            # Handle prompt-completion format
+            messages = [
+                {"role": "user", "content": item["prompt"]},
+                {"role": "assistant", "content": item["completion"]}
+            ]
+            ids = tokenizer.apply_chat_template(messages, add_generation_prompt=False, return_tensors=None)
+        elif "text" in item:
+            # Handle raw text format
+            ids = tokenizer.encode(item["text"], add_special_tokens=True)
+            if not ids or ids[-1] != tokenizer.eos_token_id:
+                ids.append(tokenizer.eos_token_id)
+        else:
+            continue
+            
+        token_ids_list.append(ids)
+        total_tokens_collected += len(ids)
+        
+        if total_tokens_collected >= target_tokens:
+            break
+            
+    return token_ids_list
 
 
 def compute_pareto_front(results: List[GabliterationResult]) -> List[GabliterationResult]:
@@ -504,8 +545,10 @@ def test_configuration(
     harmless_prompts: List[str],
     test_prompts: List[str],
     kl_prompts: List[str],
-    ppl_eval_texts: List[str],
+    ppl_eval_token_ids: List[List[int]],
     baseline_ppl: Optional[float],
+    ppl_seq_len: int,
+    ppl_num_samples: int,
     device: str
 ) -> GabliterationResult:
     """Test a single gabliteration configuration"""
@@ -590,10 +633,12 @@ def test_configuration(
     # Evaluate perplexity
     perplexity = None
     perplexity_ratio = None
-    if baseline_ppl is not None and ppl_eval_texts:
+    if baseline_ppl is not None and ppl_eval_token_ids:
         print("Evaluating perplexity...")
         ppl_res = compute_perplexity(
-            modified_model, tokenizer, ppl_eval_texts, device,
+            modified_model, tokenizer, ppl_eval_token_ids, device,
+            sequence_length=ppl_seq_len,
+            max_samples=ppl_num_samples,
             batch_size=BATCH_SIZE
         )
         perplexity = ppl_res.ppl
@@ -671,18 +716,41 @@ Examples:
         help="Output folder to save the gabliterated model (default: auto-generated based on model name)"
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=123,
+        help="Random seed for reproducibility (default: 123)"
+    )
+    parser.add_argument(
         "--disable-ppl",
         action="store_true",
         help="Disable perplexity evaluation"
     )
     parser.add_argument(
-        "--ppl-samples",
+        "--ppl-dataset",
+        type=str,
+        default="allenai/tulu-3-sft-mixture",
+        help="Dataset for perplexity evaluation (default: allenai/tulu-3-sft-mixture)"
+    )
+    parser.add_argument(
+        "--ppl-num-samples",
         type=int,
-        default=50,
-        help="Number of samples for perplexity computation (default: 50)"
+        default=256,
+        help="Number of samples for perplexity computation (default: 256)"
+    )
+    parser.add_argument(
+        "--ppl-seq-len",
+        type=int,
+        default=512,
+        help="Sequence length for perplexity computation (default: 512)"
     )
     
     args = parser.parse_args()
+    
+    # Set seed for reproducibility
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     
     # Set global configuration from arguments
     HF_MODEL_NAME = args.model
@@ -728,14 +796,22 @@ Examples:
         min(KL_DIVERGENCE_SAMPLES, len(harmless_prompts))
     )
     
-    # Prepare perplexity evaluation texts
-    ppl_eval_texts = []
+    # Prepare perplexity evaluation tokens
+    ppl_eval_token_ids = []
     baseline_ppl = None
     if not args.disable_ppl:
-        ppl_eval_texts = random.sample(harmless_prompts, min(args.ppl_samples, len(harmless_prompts)))
+        ppl_eval_token_ids = load_ppl_dataset(
+            tokenizer, 
+            dataset_path=args.ppl_dataset, 
+            num_samples=args.ppl_num_samples, 
+            sequence_length=args.ppl_seq_len,
+            seed=args.seed
+        )
         print("\nComputing baseline perplexity for the original model...")
         baseline_res = compute_perplexity(
-            original_model, tokenizer, ppl_eval_texts, device,
+            original_model, tokenizer, ppl_eval_token_ids, device,
+            sequence_length=args.ppl_seq_len,
+            max_samples=args.ppl_num_samples,
             batch_size=BATCH_SIZE
         )
         baseline_ppl = baseline_res.ppl
@@ -756,9 +832,11 @@ Examples:
                 harmless_prompts,
                 test_prompts,
                 kl_prompts,
-                ppl_eval_texts,
+                ppl_eval_token_ids,
                 baseline_ppl,
-                device
+                ppl_seq_len=args.ppl_seq_len,
+                ppl_num_samples=args.ppl_num_samples,
+                device=device
             )
             results.append(result)
         except Exception as e:
